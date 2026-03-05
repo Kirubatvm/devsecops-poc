@@ -40,6 +40,8 @@ jobs:
       uses: SonarSource/sonarqube-scan-action@v2
       env:
         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        SONAR_HOST_URL: https://sonarcloud.io
+        SONAR_ORGANIZATION: kirubatvm
 
     # Docker login
     - name: Login to DockerHub
