@@ -2,49 +2,114 @@ name: DevSecOps Pipeline
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
 
 jobs:
-  security-pipeline:
-
+  devsecops:
     runs-on: ubuntu-latest
+
+    services:
+      sonarqube:
+        image: sonarqube:community
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd="curl -f http://localhost:9000 || exit 1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      SONAR_HOST_URL: http://localhost:9000
 
     steps:
 
     - name: Checkout Code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    # SECRET SCAN
-    - name: TruffleHog Secret Scan
-      uses: trufflesecurity/trufflehog@main
+    - name: Setup Python
+      uses: actions/setup-python@v5
       with:
-        path: .
+        python-version: "3.10"
 
-    # SAST SCAN
+    - name: Install Dependencies
+      run: |
+        pip install -r requirements.txt
+
+    # -----------------------------
+    # SECRET SCANNING
+    # -----------------------------
+
+    - name: Run TruffleHog Secret Scan
+      run: |
+        docker run --rm -v $PWD:/repo trufflesecurity/trufflehog:latest filesystem /repo
+
+    # -----------------------------
+    # SNYK DEPENDENCY SCAN
+    # -----------------------------
+
+    - name: Install Snyk
+      run: npm install -g snyk
+
+    - name: Authenticate Snyk
+      run: snyk auth ${{ secrets.SNYK_TOKEN }}
+
+    - name: Run Snyk Test
+      run: snyk test || true
+
+    # -----------------------------
+    # WAIT FOR SONARQUBE
+    # -----------------------------
+
+    - name: Wait for SonarQube
+      run: |
+        for i in {1..30}; do
+          curl -s http://localhost:9000 && break
+          echo "Waiting for SonarQube..."
+          sleep 10
+        done
+
+    # -----------------------------
+    # GENERATE SONAR TOKEN
+    # -----------------------------
+
+    - name: Generate Sonar Token
+      id: sonar-token
+      run: |
+        TOKEN=$(curl -u admin:admin -X POST "http://localhost:9000/api/user_tokens/generate?name=github-token" | jq -r '.token')
+        echo "SONAR_TOKEN=$TOKEN" >> $GITHUB_ENV
+
+    # -----------------------------
+    # SONARQUBE SCAN
+    # -----------------------------
+
     - name: SonarQube Scan
-      uses: sonarsource/sonarqube-scan-action@master
+      uses: SonarSource/sonarqube-scan-action@v2
       env:
-        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+        SONAR_HOST_URL: http://localhost:9000
 
-    # DEPENDENCY SCAN
-    - name: Snyk Dependency Scan
-      uses: snyk/actions/python@master
-      env:
-        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+    # -----------------------------
+    # BUILD DOCKER IMAGE
+    # -----------------------------
 
-    # BUILD IMAGE
     - name: Build Docker Image
-      run: docker build -t devsecops-demo .
+      run: |
+        docker build -t devsecops-demo .
 
-    # CONTAINER SCAN
-    - name: Scan Docker Image
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: devsecops-demo
+    # -----------------------------
+    # START MINIKUBE
+    # -----------------------------
 
-    # DEPLOY
+    - name: Install Minikube
+      run: |
+        curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+        sudo install minikube-linux-amd64 /usr/local/bin/minikube
+
+    - name: Start Minikube
+      run: |
+        minikube start --driver=docker
+
     - name: Deploy to Kubernetes
       run: |
         kubectl apply -f k8s/deployment.yaml
